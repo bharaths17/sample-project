@@ -1,0 +1,49 @@
+pipeline {
+    //agent { label 'master' }
+    agent any
+    stages {
+        stage('Test') {
+            environment {
+						AWS_DEFAULT_REGION = "$AWS_DEFAULT_REGION_PROD"
+						AWS_ACCESS_KEY_ID = "$AWS_ACCESS_KEY_ID_PROD"
+						AWS_SECRET_ACCESS_KEY = "$AWS_SECRET_ACCESS_KEY_PROD"
+                envir = 'go'
+				repository='ConfigServerRepository'
+				dockerName='eureka'
+            }
+            steps {
+                sh '''
+                    ls -ltr
+                    aws --version
+                    export vpcstack="$envir-vpc-network"
+					export loadbalancer="$envir-loadbalancer"
+					export configserver="$envir-config-server"
+					
+					mvn clean package spring-boot:repackage
+                    export ecrRepository=$(aws cloudformation describe-stacks --stack-name $vpcstack --query "Stacks[0].Outputs[?OutputKey=='$repository'].OutputValue" --output text)
+					echo "ecrRepository $ecrRepository"
+					export gitTag=$(git rev-parse --short HEAD)
+					$(aws ecr get-login --no-include-email )
+					export ECSClusterName="$envir-config-server"
+					docker build -t $dockerName:$gitTag .
+					docker tag $dockerName:$gitTag $ecrRepository:$gitTag
+					docker push $ecrRepository:$gitTag
+					export vpcId=$(aws cloudformation describe-stacks --stack-name $vpcstack --query "Stacks[0].Outputs[?OutputKey=='VpcId'].OutputValue" --output text)
+					export privateAZ1SubnetId=$(aws cloudformation describe-stacks --stack-name $vpcstack --query "Stacks[0].Outputs[?OutputKey=='PrivateAZ1SubnetId'].OutputValue" --output text)
+					export privateAZ2SubnetId=$(aws cloudformation describe-stacks --stack-name $vpcstack --query "Stacks[0].Outputs[?OutputKey=='PrivateAZ2SubnetId'].OutputValue" --output text)
+					
+					export ECSTG=$(aws cloudformation describe-stacks --stack-name $loadbalancer --query "Stacks[0].Outputs[?OutputKey=='ConfigTGARN'].OutputValue" --output text)
+					export ECSServiceRole=$(aws cloudformation describe-stacks --stack-name $loadbalancer --query "Stacks[0].Outputs[?OutputKey=='ECSServiceRoleARN'].OutputValue" --output text)
+					export Ec2Role=$(aws cloudformation describe-stacks --stack-name $loadbalancer --query "Stacks[0].Outputs[?OutputKey=='EC2RoleARN'].OutputValue" --output text)
+					
+					export TaskAutoscalingRole=$(aws cloudformation describe-stacks --stack-name $loadbalancer --query "Stacks[0].Outputs[?OutputKey=='TaskAutoscalingRoleARN'].OutputValue" --output text)
+					export TaskRole=$(aws cloudformation describe-stacks --stack-name $loadbalancer --query "Stacks[0].Outputs[?OutputKey=='TaskRoleARN'].OutputValue" --output text)
+					export ImageId="$ecrRepository:$gitTag"
+					
+					aws cloudformation deploy --stack-name $configserver  --template-file configservercf.yaml --parameter-overrides "ApplicationEnvironment=$envir"  "ServerBasePath=/config/" "ECSClusterName=$ECSClusterName" "VpcId=$vpcId" "PrivateSubnetIds=$privateAZ1SubnetId,$privateAZ2SubnetId" "DesiredCapacity=1" "MaxSize=1" "MinSize=1" "InstanceType=t3.small" "KeyName=go-ehr-pem" "ECSTG=$ECSTG" "ECSServiceRole=$ECSServiceRole" "EC2Role=$Ec2Role" "TaskAutoscalingRole=$TaskAutoscalingRole" "TaskRole=$TaskRole" "ImageId=$ImageId" "DesiredCount=1" "MaxCapacity=1" "MinCapacity=1" "ContainerMemory=1000" "ContainerCPU=1000" --capabilities CAPABILITY_NAMED_IAM --no-fail-on-empty-changeset
+
+                '''
+            }
+        }
+    }
+}

@@ -1,0 +1,335 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Data Streams Platform Cluster Stack
+Parameters:
+  ApplicationEnvironment:
+    Description: Application Environment Name
+    Type: String
+    Default: dn
+  ServerBasePath:
+    Type: String
+  ECSClusterName:
+    Description: Specifies the cluster of the service Registry application
+    Default: data-streams-service-drr-api-cluster
+    Type: String
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Select a VPC that allows instances to access the Internet.
+  PrivateSubnetIds:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: Select at two subnets in your selected VPC.
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+    Description: Number of instances to launch in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: 5
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  MinSize:
+    Type: Number
+    Default: 2
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: m5.large
+  ECSAMI:
+    Description: AMI ID
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id
+  KeyName:
+    Description: KeyName of ec2
+    Type: String
+    Default: Atish_ec2_Key_Pair
+  ECSTG:
+    Description: Ecs target group for alb
+    Type: String
+  ECSServiceRole:
+    Description: ECS service role
+    Type: String
+  EC2Role:
+    Description: ECS service role
+    Type: String
+  TaskAutoscalingRole:
+    Description: ECS task autoscale role
+    Type: String
+  TaskRole:
+    Description: ECS task role
+    Type: String
+  ImageId:
+    Description: ECS service role
+    Type: String
+    Default: >-
+      355182703791.dkr.ecr.us-east-1.amazonaws.com/com.niceincontact.data-streams/service-registry:1.0.0-89bd971
+  ContainerPort:
+    Description: ECS ContainerPort
+    Type: String
+    Default: '8080'
+  DesiredCount:
+    Description: >-
+      The number of instantiations of the task definition to place and keep
+      running on your ECS cluster.
+    Type: Number
+    Default: 2
+  MaxCapacity:
+    Description: >-
+      Maximum number of instantiations of the task definition that can be
+      launched in your ECS cluster.
+    Type: Number
+    Default: 10
+  MinCapacity:
+    Description: >-
+      Minimum number of instantiations of the task definition that can be
+      launched in your ECS cluster.
+    Type: Number
+    Default: 2
+  ContainerMemory:
+    Description: The amount (in MiB) of memory to present to the container.
+    Type: Number
+    Default: 2048
+  ContainerCPU:
+    Description: The amount of CPU units to present to the container.
+    Type: Number
+    Default: 600
+  CPUUtilizationScaleOutThreshold:
+    Description: CPUUtilization Threshold for scale out.
+    Type: Number
+    Default: 85
+  CPUUtilizationScaleInThreshold:
+    Description: CPUUtilization Threshold for scale out.
+    Type: Number
+    Default: 35
+  CPUUtilizationScaleOutPeriod:
+    Description: >-
+      The period (in seconds) over which the metrics statistic is applied for
+      scale out.
+    Type: Number
+    Default: 300
+  CPUUtilizationScaleInPeriod:
+    Description: >-
+      The period (in seconds) over which the metrics statistic is applied for
+      scale in.
+    Type: Number
+    Default: 1800
+  CloudwatchLogGroupRetention:
+    Description: Cloudwatch log group retention period in days
+    Type: Number
+    Default: 3
+Resources:
+  CloudwatchLogsGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '${ApplicationEnvironment}-ehr-${ECSCluster}-log-group'
+      RetentionInDays: !Ref CloudwatchLogGroupRetention
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Join
+        - '-'
+        - - !Ref ApplicationEnvironment
+          - !Ref ECSClusterName
+          - ECSCluster
+  ECSSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Data Streams - ECS Security Group
+      VpcId: !Ref VpcId
+  ECSSecurityGroupHTTPinbound:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ECSSecurityGroup
+      IpProtocol: tcp
+      FromPort: '26'
+      ToPort: '65535'
+      CidrIp: 192.168.0.0/0
+  ECSSecurityGroupSSHinbound:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ECSSecurityGroup
+      IpProtocol: tcp
+      FromPort: '22'
+      ToPort: '22'
+      CidrIp: 192.168.0.0/0
+  ScalingLaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: !Ref ECSAMI
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref ECSSecurityGroup
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData: !Base64
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - echo ECS_CLUSTER=
+            - !Ref ECSCluster
+            - |2
+               >> /etc/ecs/ecs.config
+            - |
+              yum install -y aws-cfn-bootstrap
+            - '/opt/aws/bin/cfn-signal -e $? '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource ECSAutoScalingGroup '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - ''
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+  ECSAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds
+      LaunchConfigurationName: !Ref ScalingLaunchConfig
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 2
+        MaxBatchSize: 2
+        PauseTime: PT15M
+        SuspendProcesses:
+          - ReplaceUnhealthy
+          - AlarmNotification
+          - ScheduledActions
+        WaitOnResourceSignals: false
+  Service:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: !Sub '${ApplicationEnvironment}-${ECSCluster}-container'
+      DesiredCount: !Ref DesiredCount
+      LoadBalancers:
+        - ContainerName: !Sub ${ECSCluster}-container
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref ECSTG
+      Role: !Ref ECSServiceRole
+      TaskDefinition: !Ref Taskdefinition
+  AutoScalingUpCPUAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Containers CPU Utilization High
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: !Ref CPUUtilizationScaleOutPeriod
+      EvaluationPeriods: '1'
+      Threshold: !Ref CPUUtilizationScaleOutThreshold
+      AlarmActions:
+        - !Ref ServiceScalingUpPolicy
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt
+            - Service
+            - Name
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+  ServiceScalingTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: Service
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Join
+        - ''
+        - - service/
+          - !Ref ECSCluster
+          - /
+          - !GetAtt
+            - Service
+            - Name
+      RoleARN: !Ref TaskAutoscalingRole
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ServiceNamespace: ecs
+  ServiceScalingUpPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: !Sub '${ApplicationEnvironment}-${ECSCluster}-drr-scale-up-policy'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 15
+            ScalingAdjustment: 1
+          - MetricIntervalLowerBound: 15
+            MetricIntervalUpperBound: 25
+            ScalingAdjustment: 2
+          - MetricIntervalLowerBound: 25
+            ScalingAdjustment: 3
+  AutoScalingDownCPUAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Containers CPU Utilization High
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: !Ref CPUUtilizationScaleInPeriod
+      EvaluationPeriods: '1'
+      Threshold: !Ref CPUUtilizationScaleInThreshold
+      AlarmActions:
+        - !Ref ServiceScalingDownPolicy
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt
+            - Service
+            - Name
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+      ComparisonOperator: LessThanOrEqualToThreshold
+  ServiceScalingDownPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: !Sub '${ApplicationEnvironment}-${ECSCluster}-scale-down-policy'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: -1
+  Taskdefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      Family: !Join
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-ecs-policy'
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: !Sub ${ECSCluster}-container
+          Environment:
+            - Name: server.port
+              Value: !Ref ContainerPort
+            - Name: server.servlet.contextPath
+              Value: !Ref ServerBasePath
+          Essential: 'true'
+          Image: !Ref ImageId
+          Cpu: !Ref ContainerCPU
+          Memory: !Ref ContainerMemory
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: !Sub ecs-${ECSCluster}
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
